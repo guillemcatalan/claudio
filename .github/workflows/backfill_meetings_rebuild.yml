@@ -1,0 +1,50 @@
+name: "Backfill: Rebuild Open Deals with Meetings"
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "Concurrent workers (default 5)"
+        required: false
+        default: "5"
+        type: string
+      model:
+        description: "Claude model (e.g. claude-sonnet-4-6)"
+        required: false
+        default: "claude-sonnet-4-6"
+        type: string
+      dry_run:
+        description: "Dry run (list deals without processing)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Rebuild deal_context for open deals with meetings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+          AZURE_CLAUDE_ENDPOINT: ${{ secrets.AZURE_CLAUDE_ENDPOINT }}
+          AZURE_CLAUDE_API_KEY: ${{ secrets.AZURE_CLAUDE_API_KEY }}
+          AZURE_CLAUDE_DEPLOYMENT: ${{ inputs.model || 'claude-sonnet-4-6' }}
+        run: >-
+          python -m scripts.backfill_meetings_rebuild
+          --workers ${{ inputs.workers }}
+          ${{ inputs.model && format('--model {0}', inputs.model) || '' }}
+          ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}
