@@ -596,6 +596,35 @@ def run(deal_uuid: str, hs_deal_id: str, *, owners: dict[str, dict] | None = Non
             )))
         print(f"   {len(rebuild_call_ids)} existing calls re-added to context")
 
+    # ── Modjo-only calls (demos without HubSpot call object) ────────
+    modjo_only_result = (
+        supabase.table("calls")
+        .select("call_id, titulo, fecha, owner_nombre, duracion_segundos")
+        .eq("deal_id", deal_uuid)
+        .is_("hs_call_id", "null")
+        .execute()
+    )
+    modjo_only = modjo_only_result.data or []
+    modjo_only_new = [
+        c for c in modjo_only
+        if f"[modjo:{c['call_id']}]" not in current_context
+    ]
+    for c in modjo_only_new:
+        dur_s = c.get("duracion_segundos") or 0
+        dur_min = round(dur_s / 60) if dur_s else 0
+        date = c.get("fecha") or ""
+        date_display = _format_date(date)
+        title = c.get("titulo") or "—"
+        owner = c.get("owner_nombre") or "?"
+        items.append((
+            date,
+            "context",
+            f"[{date_display}] CALL [modjo:{c['call_id']}] — {owner} ({dur_min}min) — {title}"
+            f"\n  (transcripción completa en Modjo)",
+        ))
+    if modjo_only_new:
+        print(f"   {len(modjo_only_new)} Modjo-only calls added to context")
+
     # ── Write Modjo links (not chronological — just metadata) ─────────
     if modjo_updates:
         for upd in modjo_updates:
