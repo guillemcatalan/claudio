@@ -1,9 +1,8 @@
 """
-Unified deal context sync: emails, notes, and calls in chronological order.
-Replaces parallel build_deal_context + sync_calls to prevent race conditions.
+Unified deal context sync: emails, notes, meetings, and calls in chronological order.
 
 All new items are sorted by timestamp and processed sequentially:
-- Emails, notes, non-auditable calls → appended to deal_context
+- Emails, notes, meetings (COMPLETED/NO_SHOW), non-auditable calls → appended to deal_context
 - Auditable calls → inserted + audited inline with Claude → result appended
 
 This guarantees that each audit sees all chronologically prior context.
@@ -36,6 +35,17 @@ CALL_PROPS = [
     "hs_call_duration",
     "hs_call_title",
     "hubspot_owner_id",
+]
+MEETING_PROPS = [
+    "hs_timestamp",
+    "hs_meeting_title",
+    "hs_meeting_body",
+    "hs_internal_meeting_notes",
+    "hs_meeting_start_time",
+    "hs_meeting_end_time",
+    "hs_meeting_outcome",
+    "hubspot_owner_id",
+    "hs_attendee_owner_ids",
 ]
 
 _HTML_RE = re.compile(r"<[^>]+>")
@@ -234,6 +244,45 @@ def _format_call_context(
     )
 
 
+def _format_meeting(hs_id: str, p: dict, owners: dict) -> str:
+    fecha = _format_date(p.get("hs_timestamp") or p.get("hs_meeting_start_time"))
+    owner_id = p.get("hubspot_owner_id") or ""
+    owner_info = owners.get(owner_id, {})
+    author = owner_info.get("name", "?") if isinstance(owner_info, dict) else "?"
+    title = p.get("hs_meeting_title") or "—"
+    outcome = p.get("hs_meeting_outcome") or ""
+
+    header = f"[{fecha}] MEETING [hs:{hs_id}] — {author} — {title}"
+
+    if outcome == "NO_SHOW":
+        return f"{header}\n  Outcome: NO_SHOW"
+
+    start = p.get("hs_meeting_start_time") or ""
+    end = p.get("hs_meeting_end_time") or ""
+    duration = ""
+    if start and end:
+        try:
+            from datetime import datetime, timezone
+            s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            mins = int((e - s).total_seconds() / 60)
+            if mins > 0:
+                duration = f" | Duration: {mins}min"
+        except (ValueError, TypeError):
+            pass
+
+    notes_raw = p.get("hs_internal_meeting_notes") or ""
+    modjo_match = _MODJO_RE.search(notes_raw)
+    if modjo_match:
+        return f"{header}\n  Outcome: {outcome}{duration}\n  Modjo: app.modjo.ai/call-details/{modjo_match.group(1)}"
+
+    notes_clean = _strip_html(notes_raw)[:500] if notes_raw else ""
+    if notes_clean:
+        return f"{header}\n  Outcome: {outcome}{duration}\n  Notes: {notes_clean}"
+
+    return f"{header}\n  Outcome: {outcome}{duration}"
+
+
 # ── Call classification ──────────────────────────────────────────────────
 
 
@@ -384,6 +433,27 @@ def run(deal_uuid: str, hs_deal_id: str, *, owners: dict[str, dict] | None = Non
         print(f"   {len(new_note_ids)} new notes")
     else:
         print(f"   {len(note_ids)} notes — all tracked")
+
+    # ── Meetings ──────────────────────────────────────────────────────
+    print("4b. Fetching meetings ...")
+    meeting_ids = _fetch_associations(hs_deal_id, "meetings")
+    new_meeting_ids = [mid for mid in meeting_ids if mid not in existing_hs_ids]
+
+    if new_meeting_ids:
+        meeting_objects = _batch_read("meetings", new_meeting_ids, MEETING_PROPS)
+        included = 0
+        for obj in meeting_objects:
+            p = obj.get("properties", {})
+            hs_id = str(obj.get("id", ""))
+            outcome = p.get("hs_meeting_outcome") or ""
+            if outcome not in ("COMPLETED", "NO_SHOW"):
+                continue
+            date = p.get("hs_timestamp") or p.get("hs_meeting_start_time") or ""
+            items.append((date, "context", _format_meeting(hs_id, p, owners)))
+            included += 1
+        print(f"   {len(new_meeting_ids)} new meetings, {included} included (COMPLETED/NO_SHOW)")
+    else:
+        print(f"   {len(meeting_ids)} meetings — all tracked")
 
     # ── Calls ─────────────────────────────────────────────────────────
     print("5. Fetching calls ...")
@@ -545,6 +615,7 @@ def run(deal_uuid: str, hs_deal_id: str, *, owners: dict[str, dict] | None = Non
     update: dict = {
         "emails_ready": True,
         "notes_ready": True,
+        "meetings_ready": True,
     }
 
     if _all_calls_audited(deal_uuid):
