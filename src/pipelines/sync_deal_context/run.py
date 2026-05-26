@@ -575,6 +575,27 @@ def run(deal_uuid: str, hs_deal_id: str, *, owners: dict[str, dict] | None = Non
     else:
         print(f"   {len(hs_call_ids)} calls — all tracked")
 
+    # ── Re-add tracked calls missing from context (rebuild scenario) ──
+    rebuild_call_ids = [
+        cid for cid in hs_call_ids
+        if cid in existing_table_ids and cid not in existing_hs_ids
+    ]
+    if rebuild_call_ids:
+        rebuild_objects = _batch_read("calls", rebuild_call_ids, CALL_PROPS)
+        for obj in rebuild_objects:
+            p = obj.get("properties", {})
+            hs_id = str(obj.get("id", ""))
+            owner_id = p.get("hubspot_owner_id") or ""
+            owner_info = owners.get(owner_id, {})
+            owner_name = owner_info.get("name", owner_info.get("email", "?"))
+            duration_ms = p.get("hs_call_duration")
+            duration_min = round(int(int(duration_ms) / 1000) / 60) if duration_ms else 0
+            date = p.get("hs_timestamp") or ""
+            items.append((date, "context", _format_call_context(
+                hs_id, p, owner_name or "?", duration_min
+            )))
+        print(f"   {len(rebuild_call_ids)} existing calls re-added to context")
+
     # ── Write Modjo links (not chronological — just metadata) ─────────
     if modjo_updates:
         for upd in modjo_updates:
